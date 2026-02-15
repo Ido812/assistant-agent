@@ -1,0 +1,5 @@
+# Additional dependencies for the web server (server.py).
+# Install alongside the existing requirements.txt:
+#   pip install -r requirements.txt -r requirements-web.txt
+fastapi
+uvicorn[standard]

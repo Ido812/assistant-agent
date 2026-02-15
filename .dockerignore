@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Git
+.git/
+
+# Secrets (injected at runtime via volume mounts / env vars)
+.env
+credentials.json
+token.json
+
+# Data (mounted as volume in production — not baked into image)
+data/
+
+# Frontend build artifacts (rebuilt in Docker)
+web/frontend/node_modules/
+web/frontend/dist/
+
+# Other
+assistant-agent/
+.claude/

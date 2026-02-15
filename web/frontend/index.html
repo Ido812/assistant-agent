@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="he" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover: extends into iPhone safe area (notch, home indicator) -->
+    <!-- maximum-scale=1: prevents unwanted zoom -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
+
+    <!-- PWA: makes it behave like a native app when added to iPhone home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- black-translucent: status bar blends with the dark background -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- Theme color for the browser chrome / status bar -->
+    <meta name="theme-color" content="#0f0f0f" />
+
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Assistant Agent</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

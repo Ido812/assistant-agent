@@ -116,7 +116,7 @@ _fallback_chat = _client.chats.create(
 # Last 20 routing results — used as fallback context when the router returns "unknown"
 _last_exchanges = load_last_exchanges()
 
-_AGENT_NAMES = ["stock", "knowledge", "schedule"]
+_AGENT_NAMES = ["stock", "knowledge", "schedule", "work"]
 
 def _build_last_exchanges_context() -> str:
     """Build context from the last exchanges log for fallback classification."""
@@ -230,7 +230,7 @@ def main():
 
             mission = result["mission"]
             print(f"\n  Category  : {category}")
-            print(f"  Confideece: {confidence}")
+            print(f"  Confidece: {confidence}")
             print(f"  Reason    : {reason}")
             print(f"  Mission   : {mission}\n")
 
