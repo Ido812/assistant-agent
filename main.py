@@ -6,7 +6,7 @@ from agents.knowledge import solve as knowledge_solve
 from agents.stock import solve as stock_solve
 from agents.schedule import solve as schedule_solve
 from agents.work import solve as work_solve
-from agents.memory import load_history, load_last_exchanges, save_last_exchanges
+from agents.memory import load_last_exchanges, save_last_exchanges
 
 # Load environment variables from .env file
 load_dotenv()
@@ -73,11 +73,9 @@ Route here for: viewing schedule, scheduling/rescheduling lessons, creating/dele
 ### 5. "unknown" — If the message does not clearly fit any category.
 
 ## Follow-up & Context Resolution
-- The user's message may include a "[Previous context]" block with info about the last exchange (which agent handled it, what the mission was, and a preview of the agent's response).
-- Use this context to resolve ambiguous follow-ups like "and last month?", "tell me more", "what about Microsoft?", "do the same for Noam", etc.
+- The conversation history contains previous exchanges (user messages and agent responses). Use this to resolve ambiguous follow-ups like "and last month?", "tell me more", "what about Microsoft?", "do the same for Noam", etc.
 - When the follow-up continues the same topic, route to the SAME category and craft the mission with the full resolved context (e.g., replace "it" or "that" with the actual subject).
 - When the follow-up clearly switches to a new topic, ignore the previous context and classify fresh.
-- If an "[Agent memory]" block is provided, it shows each agent's recent missions. Use this to match the user's message to the correct agent when the topic seems ambiguous. For example, if the stock agent recently discussed "Apple stock" and the user says "what about Google?", route to stock.
 
 ## Mission Crafting Guidelines
 - The mission should be a clear, actionable task description tailored to what the target agent can actually do.
@@ -94,55 +92,36 @@ Do not include any other text outside the JSON.
 """
 
 
-# Chat session — in-session memory only (no persistence for the router itself)
+# Stateless Gemini client — each classification is a fresh call
 _client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-_chat = _client.chats.create(
-    model="gemini-2.5-flash",
-    config=genai.types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.0,
-    ),
+_MODEL = "gemini-2.5-flash"
+
+_ROUTER_CONFIG = genai.types.GenerateContentConfig(
+    system_instruction=SYSTEM_PROMPT,
+    temperature=0.0,
 )
 
-# Lightweight fallback chat for unknown queries (no persistence, no routing context)
-_fallback_chat = _client.chats.create(
-    model="gemini-2.5-flash",
-    config=genai.types.GenerateContentConfig(
-        system_instruction="Answer the user's question in a single helpful sentence.",
-        temperature=0.3,
-    ),
+_FALLBACK_CONFIG = genai.types.GenerateContentConfig(
+    system_instruction="Answer the user's question in a single helpful sentence.",
+    temperature=0.3,
 )
 
-# Last 20 routing results — used as fallback context when the router returns "unknown"
+# Chat history for the router — seeded into each classification call
 _last_exchanges = load_last_exchanges()
 
-_AGENT_NAMES = ["stock", "knowledge", "schedule", "work"]
-
-def _build_last_exchanges_context() -> str:
-    """Build context from the last exchanges log for fallback classification."""
+def _build_chat_history() -> list:
+    """Build chat history from the last exchanges for the Gemini chat API.
+    Returns list of Content objects in chronological order (oldest to newest)."""
     if not _last_exchanges:
-        return ""
-    # Show last 5 exchanges as context (enough to disambiguate without flooding)
-    recent = _last_exchanges[-5:]
-    lines = []
-    for ex in recent:
-        preview = ex.get("answer", "")[:100]
-        lines.append(f"- [{ex['category']}] mission: {ex['mission']} → {preview}")
-    return "[Recent exchanges:\n" + "\n".join(lines) + "]"
-
-
-def _build_agent_memory_summary() -> str:
-    """Build a brief summary of each agent's recent missions from their persisted history."""
-    lines = []
-    for agent in _AGENT_NAMES:
-        history = load_history(agent)
-        recent_missions = [h["text"] for h in history if h["role"] == "user"][-3:]
-        if recent_missions:
-            missions_str = "; ".join(f'"{m}"' for m in recent_missions)
-            lines.append(f"- {agent}: {missions_str}")
-    if not lines:
-        return ""
-    return "[Agent memory — recent missions per agent:\n" + "\n".join(lines) + "]"
+        return []
+    recent = _last_exchanges[-10:]
+    return [
+        genai.types.Content(
+            role=entry["role"],
+            parts=[genai.types.Part(text=entry["text"])],
+        )
+        for entry in recent
+    ]
 
 
 def _parse_classification(raw: str) -> dict:
@@ -152,41 +131,15 @@ def _parse_classification(raw: str) -> dict:
 
 
 def classify(user_input: str) -> dict:
-    """Send raw user input to Gemini and return the classification."""
-    response = _chat.send_message(user_input)
-    return _parse_classification(response.text)
-
-
-def classify_with_last_exchanges(user_input: str) -> dict:
-    """Retry classification with recent exchanges context."""
-    context = _build_last_exchanges_context()
-    if not context:
-        return None
-
-    message = (
-        f"{context}\n\n"
-        f"The previous classification returned 'unknown'. "
-        f"Re-examine the user's message using the recent exchanges above to find a matching category.\n\n"
-        f"{user_input}"
+    """Send user input to Gemini with recent history and return the classification."""
+    history = _build_chat_history()
+    chat = _client.chats.create(
+        model=_MODEL, config=_ROUTER_CONFIG, history=history,
     )
-    response = _chat.send_message(message)
+    response = chat.send_message(user_input)
     return _parse_classification(response.text)
 
 
-def classify_with_agent_memory(user_input: str) -> dict:
-    """Retry classification with agent memory context."""
-    agent_memory = _build_agent_memory_summary()
-    if not agent_memory:
-        return None
-
-    message = (
-        f"{agent_memory}\n\n"
-        f"The previous classification returned 'unknown'. "
-        f"Re-examine the user's message using the agent memory above to find a matching category.\n\n"
-        f"{user_input}"
-    )
-    response = _chat.send_message(message)
-    return _parse_classification(response.text)
 
 
 def main():
@@ -208,25 +161,13 @@ def main():
             confidence = result["confidence"]
             reason = result["reason"]
 
-            # Handle unknown: fallback 1 → last exchanges, fallback 2 → agent memory
+            # Handle unknown: fallback to general answer
             if category == "unknown":
-                retry = classify_with_last_exchanges(user_input)
-                if retry and retry.get("category") != "unknown":
-                    result = retry
-                    category = result["category"]
-                    confidence = result["confidence"]
-                    reason = result["reason"]
-                else:
-                    retry = classify_with_agent_memory(user_input)
-                    if retry and retry.get("category") != "unknown":
-                        result = retry
-                        category = result["category"]
-                        confidence = result["confidence"]
-                        reason = result["reason"]
-                    else:
-                        fallback = _fallback_chat.send_message(user_input)
-                        print(f"\n  {fallback.text.strip()}\n")
-                        continue
+                fallback = _client.models.generate_content(
+                    model=_MODEL, contents=user_input, config=_FALLBACK_CONFIG,
+                )
+                print(f"\n  {fallback.text.strip()}\n")
+                continue
 
             mission = result["mission"]
             print(f"\n  Category  : {category}")
@@ -255,11 +196,8 @@ def main():
 
             # Append to exchange log (in memory + disk)
             if answer:
-                _last_exchanges.append({
-                    "category": category,
-                    "mission": mission,
-                    "answer": answer,
-                })
+                _last_exchanges.append({"role": "user", "text": f"[{category}] {mission}"})
+                _last_exchanges.append({"role": "model", "text": answer})
                 save_last_exchanges(_last_exchanges)
         except BaseException as e:
             import traceback

@@ -37,18 +37,18 @@ load_dotenv()
 # Imports from the existing codebase.
 #
 # When Python imports main.py, it runs the module-level code which
-# creates the Gemini client, chat sessions, and loads exchange history.
+# creates the Gemini client, configs, and loads chat history.
 # The main() CLI loop does NOT run (protected by if __name__ == "__main__").
 # All objects below are the same live objects from main.py — not copies.
 # ──────────────────────────────────────────────────────────────────────
 from main import (
     classify,                          # Takes user text → returns {category, confidence, reason, mission}
-    classify_with_last_exchanges,      # Fallback #1: retry classification with recent context
-    classify_with_agent_memory,        # Fallback #2: retry classification with agent history
-    _fallback_chat,                    # Fallback #3: the Gemini chat session object for conversational answers
+    _client,                           # Gemini client for fallback answers
+    _MODEL,                            # Model name
+    _FALLBACK_CONFIG,                  # Config for fallback (unknown) answers
     _last_exchanges,                   # The same list object from main.py — shared reference
 )
-from agents.memory import save_last_exchanges   # Saves exchange log to disk
+from agents.memory import save_last_exchanges   # Saves chat history to disk
 from agents.knowledge import solve as knowledge_solve
 from agents.stock import solve as stock_solve
 from agents.schedule import solve as schedule_solve
@@ -90,10 +90,10 @@ _SOLVERS = {
 def _route_and_solve(user_input: str) -> dict:
     """
     The core routing logic — same flow as main.py's while-loop:
-    1. Classify the user's message (stock? work? knowledge? schedule?)
-    2. If unknown, try fallback strategies
+    1. Classify the user's message (with chat history for context)
+    2. If unknown, give a general fallback answer
     3. Call the matching agent's solve() function
-    4. Save the exchange to the log
+    4. Save the exchange to chat history
 
     This runs in a background thread because solve() functions use
     asyncio.run() internally, which would conflict with the web server's
@@ -102,26 +102,18 @@ def _route_and_solve(user_input: str) -> dict:
     result = classify(user_input)
     category = result["category"]
 
-    # Fallback chain for unknown messages
+    # Unknown: fallback to general answer
     if category == "unknown":
-        retry = classify_with_last_exchanges(user_input)
-        if retry and retry.get("category") != "unknown":
-            result = retry
-            category = result["category"]
-        else:
-            retry = classify_with_agent_memory(user_input)
-            if retry and retry.get("category") != "unknown":
-                result = retry
-                category = result["category"]
-            else:
-                fallback = _fallback_chat.send_message(user_input)
-                return {
-                    "answer": fallback.text.strip(),
-                    "category": "unknown",
-                    "confidence": 0,
-                    "reason": "No matching category",
-                    "mission": "",
-                }
+        fallback = _client.models.generate_content(
+            model=_MODEL, contents=user_input, config=_FALLBACK_CONFIG,
+        )
+        return {
+            "answer": fallback.text.strip(),
+            "category": "unknown",
+            "confidence": 0,
+            "reason": "No matching category",
+            "mission": "",
+        }
 
     mission = result["mission"]
     solver = _SOLVERS.get(category)
@@ -130,12 +122,9 @@ def _route_and_solve(user_input: str) -> dict:
 
     answer = solver(mission)
 
-    # Save to exchange log
-    _last_exchanges.append({
-        "category": category,
-        "mission": mission,
-        "answer": answer,
-    })
+    # Save to chat history
+    _last_exchanges.append({"role": "user", "text": f"[{category}] {mission}"})
+    _last_exchanges.append({"role": "model", "text": answer})
     save_last_exchanges(_last_exchanges)
 
     return {
@@ -207,31 +196,20 @@ async def chat_stream(request: Request):
         async with _chat_lock:
             loop = asyncio.get_event_loop()
             try:
-                # Step 2: Classify the message
+                # Step 2: Classify the message (with chat history for context)
                 result = await loop.run_in_executor(None, classify, user_input)
                 category = result["category"]
 
-                # Fallback chain for unknown messages
+                # Unknown: fallback to general answer
                 if category == "unknown":
-                    retry = await loop.run_in_executor(
-                        None, classify_with_last_exchanges, user_input
+                    fallback = await loop.run_in_executor(
+                        None,
+                        lambda: _client.models.generate_content(
+                            model=_MODEL, contents=user_input, config=_FALLBACK_CONFIG,
+                        ),
                     )
-                    if retry and retry.get("category") != "unknown":
-                        result = retry
-                        category = result["category"]
-                    else:
-                        retry = await loop.run_in_executor(
-                            None, classify_with_agent_memory, user_input
-                        )
-                        if retry and retry.get("category") != "unknown":
-                            result = retry
-                            category = result["category"]
-                        else:
-                            fallback = await loop.run_in_executor(
-                                None, _fallback_chat.send_message, user_input
-                            )
-                            yield f"data: {json.dumps({'type': 'answer', 'answer': fallback.text.strip(), 'category': 'unknown', 'confidence': 0, 'reason': 'No matching category', 'mission': ''})}\n\n"
-                            return
+                    yield f"data: {json.dumps({'type': 'answer', 'answer': fallback.text.strip(), 'category': 'unknown', 'confidence': 0, 'reason': 'No matching category', 'mission': ''})}\n\n"
+                    return
 
                 # Step 3: Tell the phone which agent is working
                 yield f"data: {json.dumps({'type': 'classified', 'category': category, 'confidence': result['confidence']})}\n\n"
@@ -245,12 +223,9 @@ async def chat_stream(request: Request):
 
                 answer = await loop.run_in_executor(None, solver, mission)
 
-                # Save to exchange log
-                _last_exchanges.append({
-                    "category": category,
-                    "mission": mission,
-                    "answer": answer,
-                })
+                # Save to chat history
+                _last_exchanges.append({"role": "user", "text": f"[{category}] {mission}"})
+                _last_exchanges.append({"role": "model", "text": answer})
                 await loop.run_in_executor(
                     None, save_last_exchanges, _last_exchanges
                 )

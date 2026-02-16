@@ -5,7 +5,7 @@ _DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "memory"
 )
 MAX_EXCHANGES = 10  # per-agent: 10 exchanges = 20 entries (10 user + 10 model)
-MAX_LAST_EXCHANGES = 20  # router exchange log: last 20 routing results
+MAX_LAST_EXCHANGES = 20  # router chat history: last 20 entries (10 user + 10 model)
 
 
 def _ensure_dir():
@@ -56,8 +56,8 @@ def append_exchange(agent_name: str, user_text: str, model_text: str) -> None:
 
 
 def load_last_exchanges() -> list[dict]:
-    """Load the router's exchange log (last 20 routing results).
-    Returns list of {"category": str, "mission": str, "answer": str} dicts."""
+    """Load the router's chat history (last 20 entries) used for classification context.
+    Returns list of {"role": "user"|"model", "text": str} dicts."""
     _ensure_dir()
     path = os.path.join(_DATA_DIR, "last_exchange.json")
     if not os.path.exists(path):
@@ -65,9 +65,6 @@ def load_last_exchanges() -> list[dict]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Handle migration from old single-dict format
-        if isinstance(data, dict):
-            return [data]
         if not isinstance(data, list):
             return []
         return data[-MAX_LAST_EXCHANGES:]
@@ -76,7 +73,7 @@ def load_last_exchanges() -> list[dict]:
 
 
 def save_last_exchanges(exchanges: list[dict]) -> None:
-    """Save the router's exchange log, keeping only the last 20."""
+    """Save the router's chat history, keeping only the last 20 entries."""
     _ensure_dir()
     path = os.path.join(_DATA_DIR, "last_exchange.json")
     trimmed = exchanges[-MAX_LAST_EXCHANGES:]
