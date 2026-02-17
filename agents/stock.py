@@ -106,17 +106,18 @@ async def _solve_async(mission: str) -> str:
                     if part.function_call
                 ]
 
-                # Execute each tool call through the MCP server
-                function_response_parts = []
-                for fc in function_calls:
-                    result = await session.call_tool(fc.name, dict(fc.args) if fc.args else {})
-                    text_result = result.content[0].text if result.content else "No result"
-                    function_response_parts.append(
-                        types.Part.from_function_response(
-                            name=fc.name,
-                            response={"result": text_result},
-                        )
+                # Execute all tool calls in parallel through the MCP server
+                results = await asyncio.gather(*(
+                    session.call_tool(fc.name, dict(fc.args) if fc.args else {})
+                    for fc in function_calls
+                ))
+                function_response_parts = [
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": result.content[0].text if result.content else "No result"},
                     )
+                    for fc, result in zip(function_calls, results)
+                ]
 
                 # Feed the model's call + tool results back into the conversation
                 contents.append(response.candidates[0].content)

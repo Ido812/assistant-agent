@@ -147,23 +147,23 @@ async def _solve_async(mission: str) -> str:
                     if part.function_call
                 ]
 
-                function_response_parts = []
-                for fc in function_calls:
+                async def _execute_tool_call(fc):
                     if fc.name == "query_schedule":
-                        # Ask the schedule agent directly (await async version to avoid nested asyncio.run)
                         question = fc.args.get("question", "")
-                        text_result = await schedule_solve_async(question)
+                        return await schedule_solve_async(question)
                     else:
-                        # Route to work MCP server
                         result = await work_session.call_tool(fc.name, dict(fc.args) if fc.args else {})
-                        text_result = result.content[0].text if result.content else "No result"
+                        return result.content[0].text if result.content else "No result"
 
-                    function_response_parts.append(
-                        types.Part.from_function_response(
-                            name=fc.name,
-                            response={"result": text_result},
-                        )
+                # Execute all tool calls in parallel
+                results = await asyncio.gather(*(_execute_tool_call(fc) for fc in function_calls))
+                function_response_parts = [
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": text_result},
                     )
+                    for fc, text_result in zip(function_calls, results)
+                ]
 
                 contents.append(response.candidates[0].content)
                 contents.append(types.Content(role="user", parts=function_response_parts))
