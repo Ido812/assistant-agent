@@ -44,52 +44,85 @@ def read_lessons(month: str) -> str:
 
 
 @mcp.tool()
-def add_lesson(
-    student_name: str,
-    date: str,
-    time: str,
-    price: str,
-    paid: str = "yes",
-    payment_date: str = "",
-) -> str:
-    """Add a lesson record to the CSV.
-    date in YYYY-MM-DD, time in HH:MM (lesson start time), price in NIS.
-    paid is 'yes' or 'no'. payment_date in YYYY-MM-DD or empty."""
+def add_lesson(lessons: list[dict]) -> str:
+    """Add one or more lesson records to the CSV. Each item in the list is a dict with keys:
+    student_name, date (YYYY-MM-DD), time (HH:MM), price (NIS),
+    paid ('yes' or 'no', default 'yes'), payment_date (YYYY-MM-DD or empty).
+    All lessons are checked for duplicates and added in a single batch."""
     _ensure_csv()
-    # Check for duplicate by date + time (same slot = same lesson regardless of name)
+    # Read existing rows to check for duplicates
+    existing_slots = set()
     with open(_CSV_PATH, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row["date"] == date and row["time"] == time:
-                return f"Lesson already exists on {date} at {time} ({row['student_name']})."
-    with open(_CSV_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([student_name, date, time, price, paid, payment_date])
-    return f"Lesson added: {student_name} on {date} at {time}, {price} NIS, paid={paid}."
+            existing_slots.add((row["date"], row["time"]))
+
+    results = []
+    new_rows = []
+    for lesson in lessons:
+        date = lesson["date"]
+        time = lesson["time"]
+        student_name = lesson["student_name"]
+        price = lesson["price"]
+        paid = lesson.get("paid", "yes")
+        payment_date = lesson.get("payment_date", "")
+
+        if (date, time) in existing_slots:
+            results.append(f"Lesson already exists on {date} at {time} — skipped.")
+        else:
+            new_rows.append([student_name, date, time, price, paid, payment_date])
+            existing_slots.add((date, time))
+            results.append(f"Lesson added: {student_name} on {date} at {time}, {price} NIS, paid={paid}.")
+
+    if new_rows:
+        with open(_CSV_PATH, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(new_rows)
+
+    return "\n".join(results)
 
 
 @mcp.tool()
-def update_payment(student_name: str, date: str, time: str, paid: str, payment_date: str = "") -> str:
-    """Update payment status for a lesson. paid is 'yes' or 'no'.
-    date (YYYY-MM-DD) and time (HH:MM) identify the lesson."""
+def update_payment(payments: list[dict]) -> str:
+    """Update payment status for one or more lessons. Each item in the list is a dict with keys:
+    student_name, date (YYYY-MM-DD), time (HH:MM), paid ('yes' or 'no'),
+    payment_date (YYYY-MM-DD or empty, optional).
+    All updates are applied in a single batch read/write."""
     _ensure_csv()
     rows = []
-    updated = False
     with open(_CSV_PATH, "r") as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            if row["date"] == date and row["time"] == time:
-                row["paid"] = paid
-                row["payment_date"] = payment_date
-                updated = True
-            rows.append(row)
-    if not updated:
-        return f"No lesson found on {date} at {time}."
-    with open(_CSV_PATH, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=_HEADERS)
-        writer.writeheader()
-        writer.writerows(rows)
-    return f"Payment updated: {student_name} on {date} → paid={paid}."
+        rows = list(reader)
+
+    # Build lookup of updates by (date, time)
+    updates = {}
+    for p in payments:
+        key = (p["date"], p["time"])
+        updates[key] = p
+
+    results = []
+    matched_keys = set()
+    for row in rows:
+        key = (row["date"], row["time"])
+        if key in updates:
+            p = updates[key]
+            row["paid"] = p["paid"]
+            row["payment_date"] = p.get("payment_date", "")
+            matched_keys.add(key)
+            results.append(f"Payment updated: {p['student_name']} on {p['date']} → paid={p['paid']}.")
+
+    for p in payments:
+        key = (p["date"], p["time"])
+        if key not in matched_keys:
+            results.append(f"No lesson found on {p['date']} at {p['time']}.")
+
+    if matched_keys:
+        with open(_CSV_PATH, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=_HEADERS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    return "\n".join(results)
 
 
 @mcp.tool()

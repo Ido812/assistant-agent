@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
@@ -20,7 +21,8 @@ _DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CREDENTIALS_FILE = os.path.join(_DIR, "credentials.json")
 _TOKEN_FILE = os.path.join(_DIR, "token.json")
 
-# Cached service so we don't re-auth on every tool call within one subprocess
+# Cached credentials and service (service is NOT thread-safe, use _build_calendar_service() for threads)
+_creds_cache = None
 _service_cache = None
 
 # Human-friendly names for Google Calendar event color IDs
@@ -39,11 +41,11 @@ COLOR_NAMES = {
 }
 
 
-def _get_calendar_service():
-    """Authenticate and return a Google Calendar API service, caching across calls."""
-    global _service_cache
-    if _service_cache is not None:
-        return _service_cache
+def _get_credentials():
+    """Authenticate and return cached Google OAuth credentials."""
+    global _creds_cache
+    if _creds_cache is not None and _creds_cache.valid:
+        return _creds_cache
 
     creds = None
     if os.path.exists(_TOKEN_FILE):
@@ -58,8 +60,22 @@ def _get_calendar_service():
         with open(_TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
 
-    _service_cache = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    _creds_cache = creds
+    return _creds_cache
+
+
+def _get_calendar_service():
+    """Return a cached Calendar API service for single-threaded use."""
+    global _service_cache
+    if _service_cache is not None:
+        return _service_cache
+    _service_cache = build("calendar", "v3", credentials=_get_credentials(), cache_discovery=False)
     return _service_cache
+
+
+def _build_calendar_service():
+    """Build a fresh Calendar API service — safe to call from any thread."""
+    return build("calendar", "v3", credentials=_get_credentials(), cache_discovery=False)
 
 
 def _to_rfc3339(dt_str: str) -> str:
@@ -137,14 +153,21 @@ def create_event(
 
 
 @mcp.tool()
-def delete_event(event_id: str) -> str:
-    """Delete a Google Calendar event by its event ID."""
-    service = _get_calendar_service()
-    try:
-        service.events().delete(calendarId="primary", eventId=event_id).execute()
-        return f"Event {event_id} deleted successfully."
-    except Exception as e:
-        return f"Failed to delete event {event_id}: {e}"
+async def delete_event(event_ids: list[str]) -> str:
+    """Delete one or more Google Calendar events by their event IDs.
+    All deletions run in parallel."""
+    def _delete(event_id: str) -> str:
+        service = _build_calendar_service()
+        try:
+            service.events().delete(calendarId="primary", eventId=event_id).execute()
+            return f"Event {event_id} deleted successfully."
+        except Exception as e:
+            return f"Failed to delete event {event_id}: {e}"
+
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_delete, eid.strip()) for eid in event_ids)
+    )
+    return "\n".join(results)
 
 
 @mcp.tool()
