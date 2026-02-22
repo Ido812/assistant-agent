@@ -7,8 +7,15 @@ load_dotenv()
 
 # System prompt for the knowledge agent
 SYSTEM_PROMPT = """You are an expert tutor in mathematics, computer science, and physics.
-You receive a mission and must solve it clearly and step by step.
-Keep your answers accurate, concise, and easy to understand for a student."""
+
+## Reasoning Approach
+Think step by step before answering:
+1. Understand what is being asked.
+2. Plan your solution approach.
+3. Work through each step, showing your reasoning.
+4. State the final answer clearly.
+
+Keep your explanations accurate and easy to understand for a student."""
 
 
 # Load persisted history and seed the chat session

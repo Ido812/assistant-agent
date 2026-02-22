@@ -47,7 +47,21 @@ Lesson identification by color:
 - Flamingo = Shoham high school lesson (200 NIS)
 - These colors are NEVER lessons: Grape, Sage, Banana, Tomato, Peacock, Basil
 
-For any earnings/money questions, ALWAYS use the calculate_earnings tool. NEVER do arithmetic yourself."""
+For any earnings/money questions, ALWAYS use the calculate_earnings tool. NEVER do arithmetic yourself.
+
+## ReAct Reasoning Loop
+You operate as a ReAct agent: Reason → Act → Observe → repeat until done.
+- Before calling a tool: think about why you need it and what you expect to learn.
+- After receiving results: analyze what you observed and decide what to do next.
+- Continue until you have enough information to give a complete, accurate final answer.
+
+## Retry Policy — CRITICAL
+If a tool call returns an ❌ ERROR, you MUST NOT report failure to the user.
+Instead:
+1. Analyze what went wrong (wrong event ID? bad date format? stale data?)
+2. Fix the issue (e.g. call list_events again to get fresh event IDs)
+3. Retry the failed operation with corrected parameters
+Only stop retrying if the same error repeats 3+ times with no progress."""
 
 # Full path to the MCP server so it works from any working directory
 _MCP_SERVER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_servers", "schedule_mcp.py")
@@ -72,6 +86,22 @@ _TYPE_MAP = {
 }
 
 
+def _convert_schema(schema: dict) -> dict:
+    """Recursively convert a JSON Schema dict to Gemini's schema format."""
+    result = {"type": _TYPE_MAP.get(schema.get("type", "string"), "STRING")}
+    if "description" in schema:
+        result["description"] = schema["description"]
+    if schema.get("type") == "array" and "items" in schema:
+        result["items"] = _convert_schema(schema["items"])
+    if schema.get("type") == "object" and "properties" in schema:
+        result["properties"] = {
+            k: _convert_schema(v) for k, v in schema["properties"].items()
+        }
+        if "required" in schema:
+            result["required"] = schema["required"]
+    return result
+
+
 def _mcp_tools_to_gemini(mcp_tools) -> list:
     """Convert MCP tool schemas into the dict format Gemini expects."""
     declarations = []
@@ -80,11 +110,7 @@ def _mcp_tools_to_gemini(mcp_tools) -> list:
         required = []
         if tool.inputSchema and "properties" in tool.inputSchema:
             for name, schema in tool.inputSchema["properties"].items():
-                prop_type = _TYPE_MAP.get(schema.get("type", "string"), "STRING")
-                properties[name] = {
-                    "type": prop_type,
-                    "description": schema.get("description", ""),
-                }
+                properties[name] = _convert_schema(schema)
             required = tool.inputSchema.get("required", [])
 
         decl = {"name": tool.name, "description": tool.description or ""}
@@ -132,7 +158,14 @@ async def _solve_async(mission: str) -> str:
             )
 
             # Function calling loop: Gemini may request tool calls before answering
-            while response.candidates[0].content.parts[0].function_call:
+            MAX_TOOL_ITERATIONS = 10
+            iteration = 0
+
+            while any(part.function_call for part in response.candidates[0].content.parts):
+                iteration += 1
+                if iteration > MAX_TOOL_ITERATIONS:
+                    break
+
                 # Gather every tool call from the response
                 function_calls = [
                     part.function_call
@@ -145,17 +178,38 @@ async def _solve_async(mission: str) -> str:
                     session.call_tool(fc.name, dict(fc.args) if fc.args else {})
                     for fc in function_calls
                 ))
+
+                # Extract result text for each tool call
+                result_texts = [
+                    result.content[0].text if result.content else "No result"
+                    for result in results
+                ]
+
                 function_response_parts = [
                     types.Part.from_function_response(
                         name=fc.name,
-                        response={"result": result.content[0].text if result.content else "No result"},
+                        response={"result": text},
                     )
-                    for fc, result in zip(function_calls, results)
+                    for fc, text in zip(function_calls, result_texts)
                 ]
+
+                # Check if any tool call failed
+                has_errors = any("❌ ERROR" in text for text in result_texts)
 
                 # Feed the model's call + tool results back into the conversation
                 contents.append(response.candidates[0].content)
-                contents.append(types.Content(role="user", parts=function_response_parts))
+
+                if has_errors:
+                    # Inject a retry nudge so Gemini fixes and retries instead of giving up
+                    retry_nudge = types.Part(text=(
+                        "⚠️ One or more tool calls above returned ❌ ERROR. "
+                        "Do NOT give up or report failure to the user. "
+                        "Analyze the error, fix the issue (re-list events if IDs may be "
+                        "stale, correct the date/time format, etc.), and retry the failed operation."
+                    ))
+                    contents.append(types.Content(role="user", parts=function_response_parts + [retry_nudge]))
+                else:
+                    contents.append(types.Content(role="user", parts=function_response_parts))
 
                 # Let Gemini process the tool results (may call more tools or answer)
                 response = _client.models.generate_content(

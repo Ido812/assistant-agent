@@ -162,7 +162,7 @@ async def delete_event(event_ids: list[str]) -> str:
             service.events().delete(calendarId="primary", eventId=event_id).execute()
             return f"Event {event_id} deleted successfully."
         except Exception as e:
-            return f"Failed to delete event {event_id}: {e}"
+            return f"❌ ERROR: Failed to delete {event_id}: {e}"
 
     results = await asyncio.gather(
         *(asyncio.to_thread(_delete, eid.strip()) for eid in event_ids)
@@ -290,6 +290,48 @@ def calculate_earnings(start_date: str, end_date: str) -> str:
         lines.append(f"  {name}: {amount} NIS ({count} lessons)")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def list_lessons(start_date: str, end_date: str) -> str:
+    """Return a JSON list of lesson events in the date range.
+    Each item has: student_name, date (YYYY-MM-DD), time (HH:MM), price (int).
+    Only returns events with lesson colors (Lavender/Default/Flamingo).
+    start_date and end_date in YYYY-MM-DD format."""
+    import json
+    service = _get_calendar_service()
+    time_min = start_date + "T00:00:00Z"
+    time_max = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d") + "T00:00:00Z"
+
+    result = service.events().list(
+        calendarId="primary",
+        timeMin=time_min,
+        timeMax=time_max,
+        timeZone=TIMEZONE,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    lessons = []
+    for event in result.get("items", []):
+        color_id = event.get("colorId", "")
+        if color_id in _NON_LESSON_COLORS:
+            continue
+        start = event["start"].get("dateTime", "")
+        if not start:
+            continue  # skip all-day events
+        date_str = start[:10]
+        time_str = start[11:16]
+        student_name = event.get("summary", "(No title)")
+        price = _get_lesson_price(student_name, color_id)
+        lessons.append({
+            "student_name": student_name,
+            "date": date_str,
+            "time": time_str,
+            "price": price,
+        })
+
+    return json.dumps(lessons, ensure_ascii=False)
 
 
 if __name__ == "__main__":

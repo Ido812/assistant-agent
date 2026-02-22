@@ -13,7 +13,13 @@ load_dotenv()
 SYSTEM_PROMPT = """You are a stock market analyst assistant.
 You help the user analyze stocks, make sense of market data, and answer investing questions.
 Use the available tools to fetch real-time stock data when needed.
-Keep your answers clear, data-driven, and concise."""
+Keep your answers clear, data-driven, and concise.
+
+## ReAct Reasoning Loop
+You operate as a ReAct agent: Reason → Act → Observe → repeat until done.
+- Before calling a tool: think about why you need it and what you expect to learn.
+- After receiving results: analyze what you observed and decide what to do next.
+- Continue until you have enough information to give a complete, accurate final answer."""
 
 # Full path to the MCP server so it works from any working directory
 _MCP_SERVER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_servers", "stock_mcp.py")
@@ -38,6 +44,22 @@ _TYPE_MAP = {
 }
 
 
+def _convert_schema(schema: dict) -> dict:
+    """Recursively convert a JSON Schema dict to Gemini's schema format."""
+    result = {"type": _TYPE_MAP.get(schema.get("type", "string"), "STRING")}
+    if "description" in schema:
+        result["description"] = schema["description"]
+    if schema.get("type") == "array" and "items" in schema:
+        result["items"] = _convert_schema(schema["items"])
+    if schema.get("type") == "object" and "properties" in schema:
+        result["properties"] = {
+            k: _convert_schema(v) for k, v in schema["properties"].items()
+        }
+        if "required" in schema:
+            result["required"] = schema["required"]
+    return result
+
+
 def _mcp_tools_to_gemini(mcp_tools) -> list:
     """Convert MCP tool schemas into the dict format Gemini expects."""
     declarations = []
@@ -46,11 +68,7 @@ def _mcp_tools_to_gemini(mcp_tools) -> list:
         required = []
         if tool.inputSchema and "properties" in tool.inputSchema:
             for name, schema in tool.inputSchema["properties"].items():
-                prop_type = _TYPE_MAP.get(schema.get("type", "string"), "STRING")
-                properties[name] = {
-                    "type": prop_type,
-                    "description": schema.get("description", ""),
-                }
+                properties[name] = _convert_schema(schema)
             required = tool.inputSchema.get("required", [])
 
         decl = {"name": tool.name, "description": tool.description or ""}
@@ -98,7 +116,7 @@ async def _solve_async(mission: str) -> str:
             )
 
             # Function calling loop: Gemini may request tool calls before answering
-            while response.candidates[0].content.parts[0].function_call:
+            while any(part.function_call for part in response.candidates[0].content.parts):
                 # Gather every tool call from the response
                 function_calls = [
                     part.function_call
